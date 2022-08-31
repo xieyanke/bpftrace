@@ -9,6 +9,16 @@ and this project adheres to
 ## Unreleased
 
 #### Added
+#### Changed
+#### Deprecated
+#### Removed
+#### Fixed
+#### Docs
+#### Tools
+
+## [0.16.0] 2022-08-30
+
+#### Added
 - Add builtin: `numaid`
   - [#2177](https://github.com/iovisor/bpftrace/pull/2177)
 - Add helper verifier error handling
@@ -27,6 +37,8 @@ and this project adheres to
   - [#2264](https://github.com/iovisor/bpftrace/pull/2264)
 - Helper errors (-k, -kk options) are now emitted to text or json output
   - [#2326](https://github.com/iovisor/bpftrace/pull/2326)
+- kprobe offset verification is now optional, without requiring --unsafe
+  - [#2332](https://github.com/iovisor/bpftrace/pull/2332)
 
 #### Deprecated
 #### Removed
@@ -50,7 +62,6 @@ and this project adheres to
 - Fix access to ctx
   - [#2343](https://github.com/iovisor/bpftrace/pull/2343)
 
-#### Added
 #### Docs
 #### Tools
 - Add sslsnoop and ssllatency tools
