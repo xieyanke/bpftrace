@@ -1,8 +1,8 @@
 # bpftrace 参考指南
 
-这是一个不断进展的项目，如果缺少了某些内容，请查看 bpftrace 的源码，看看是否在那里
+这是一个在不断演进中的项目，如果某些内容缺失，请查看 bpftrace 的源码，看看那里是否可以找到。
 
-如果你发现某些内容过时了，请提交一个问题或者一个更新文档的 PR。
+如果你发现某些内容已经过时了，请提交一个问题或者一个更新文档的 PR。
 
 
 # 用法
@@ -575,3 +575,403 @@ Attaching 1 probe...
 2 string
 ^C
 ```
+
+# 采样器
+
+- kprobe - 内核函数开始时采样
+- kretprobe - 内核函数返回时采样
+- uprobe - 用户函数开始时采样
+- uretprobe - 用户函数返回时采样
+- tracepoint - 内核的静态追踪点
+- usdt - 用户级的静态追踪点
+- profile - 周期性采样
+- interval - 周期性输出
+- software - 内核软事件
+- hardware - 处理器级事件
+
+一些类型的探测器允许通过通配符匹配多个探测，例如：kprobe:vfs_*。你也可以通过一个以逗号分割的 action 代码块列表为多个探测点指定 action。
+双引号字符串可以被用来在追踪点定义时使用转义字符。
+
+## 1. kprobe/kretprobe: 内核级的动态追踪
+语法：
+```
+kprobe:function_name[+offset]
+kretprobe:function_name
+```
+
+这里使用 kprobes（一种内核能力）。kprobe 在内核函数开始的时候开始探测，kretprobe 在函数返回的时候开始探测。
+
+示例：
+```
+# bpftrace -e 'kprobe:do_nanosleep { printf("sleep by %d\n", tid); }'
+Attaching 1 probe...
+sleep by 1396
+sleep by 3669
+sleep by 1396
+sleep by 27662
+sleep by 3669
+^C
+```
+
+kprobe 页允许在被探测的函数中指定偏移量：
+
+```
+# gdb -q /usr/lib/debug/boot/vmlinux-`uname -r` --ex 'disassemble do_sys_open'
+Reading symbols from /usr/lib/debug/boot/vmlinux-5.0.0-32-generic...done.
+Dump of assembler code for function do_sys_open:
+   0xffffffff812b2ed0 <+0>:     callq  0xffffffff81c01820 <__fentry__>
+   0xffffffff812b2ed5 <+5>:     push   %rbp
+   0xffffffff812b2ed6 <+6>:     mov    %rsp,%rbp
+   0xffffffff812b2ed9 <+9>:     push   %r15
+...
+# bpftrace -e 'kprobe:do_sys_open+9 { printf("in here\n"); }'
+Attaching 1 probe...
+in here
+...
+```
+
+这个地址通过 vmlinux （调试符号）进行检查如果与指令对齐则添加到函数中，否则将不会添加成功。
+
+```
+# bpftrace -e 'kprobe:do_sys_open+1 { printf("in here\n"); }'
+Attaching 1 probe...
+Could not add kprobe into middle of instruction: /usr/lib/debug/boot/vmlinux-5.0.0-32-generic:do_sys_open+1
+```
+如果 bpftrace 编译的之后配置了 ALLOW_UNSAFE_PROBE 选项，你可以使用 --unsafe 选项来跳过检查。但这种情况 linux 内核仍然会进行指令集的对齐检查的。
+
+原始示例在：[]() []()
+
+## 2. kprobe/kretprobe：动态追踪内核参数
+语法：
+```
+kprobe: arg0, arg1, ..., argN
+kretprobe: retval
+```
+
+实参可以通过这些变量名称访问。arg0 是第一个参数并且只能被一个 kprobe 探测器访问。retval 是一个被探测函数的返回值，并且只能被 kretprobe 探测器访问。
+
+示例：
+```
+# bpftrace -e 'kprobe:do_sys_open { printf("opening: %s\n", str(arg1)); }'
+Attaching 1 probe...
+opening: /proc/cpuinfo
+opening: /proc/stat
+opening: /proc/diskstats
+opening: /proc/stat
+opening: /proc/vmstat
+[...]
+```
+
+```
+# bpftrace -e 'kprobe:do_sys_open { printf("open flags: %d\n", arg2); }'
+Attaching 1 probe...
+open flags: 557056
+open flags: 32768
+open flags: 32768
+open flags: 32768
+[...]
+```
+
+```
+# bpftrace -e 'kretprobe:do_sys_open { printf("open flags: %d\n", retval); }'
+Attaching 1 probe...
+open flags: 557056
+open flags: 32768
+open flags: 32768
+open flags: 32768
+[...]
+```
+
+一个结构体实参的示例：
+```
+# cat path.bt
+#include <linux/path.h>
+#include <linux/dcache.h>
+
+kprobe:vfs_open
+{
+	printf("open path: %s\n", str(((struct path *)arg0)->dentry->d_name.name));
+}
+
+# bpftrace path.bt
+Attaching 1 probe...
+open path: dev
+open path: if_inet6
+open path: retrans_time_ms
+[...]
+```
+这里的 arg0 被强制转换为了 struct path 指针类型，因为那是 vfs_open() 函数的第一个参数。结构体的支持与 bcc 相同，并且基于可用过的 linux headers。这就意味着并不是所有的结构体都可以使用，并且你可能需要手工定义一些结构体。
+
+如果内核有 BTF 数据，所有的内核结构体都可以在不定义他们的前提下使用，例如：
+```
+# bpftrace -e 'kprobe:vfs_open { printf("open path: %s\n", \
+                                 str(((struct path *)arg0)->dentry->d_name.name)); }'
+Attaching 1 probe...
+open path: cmdline
+open path: interrupts
+[...]
+```
+
+更多详细信息请查看 [BTF 的支持]()
+
+原始示例：[kprobe]() [kretprobe]()
+
+## 3. uprobe / uretprobe：用户级动态追踪
+语法：
+```
+uprobe:library_name:function_name[+offset]
+uprobe:library_name:address
+uretprobe:library_name:function_name
+```
+
+这里使用的是 uprobes。uprobe 在用户级函数开始时开始探测， uretprobo 得函数返回时开始探测。
+
+为了列出可用的 uprobes，可以使用任意程序来列出二进制程序的文本段符号，比如 objdump 与 nm。例如：
+```
+# objdump -tT /bin/bash | grep readline
+00000000007003f8 g    DO .bss	0000000000000004  Base        rl_readline_state
+0000000000499e00 g    DF .text	00000000000001c5  Base        readline_internal_char
+00000000004993d0 g    DF .text	0000000000000126  Base        readline_internal_setup
+000000000046d400 g    DF .text	000000000000004b  Base        posix_readline_initialize
+000000000049a520 g    DF .text	0000000000000081  Base        readline
+[...]
+```
+
+这里从 /bin/bash 中列出了多个包含 readline 的函数。这些都可以通过 uprobe 与 uretprobe 进行探测。
+
+示例：
+```
+# bpftrace -e 'uretprobe:/bin/bash:readline { printf("read a line\n"); }'
+Attaching 1 probe...
+read a line
+read a line
+read a line
+^C
+```
+
+在追踪的时候，出发了几次 /bin/bash 中的 readline() 函数。这个例子在下面的章节中仍会继续介绍。
+
+通过虚拟地址来指定探测点也是可以的，就像这样：
+```
+# objdump -tT /bin/bash | grep main
+...
+000000000002ec00 g    DF .text  0000000000001868  Base        main
+...
+# bpftrace -e 'uprobe:/bin/bash:0x2ec00 { printf("in here\n"); }'
+Attaching 1 probe...
+```
+
+在探测器的函数内部也可以指定被探测函数的偏移量：
+```
+# objdump -d /bin/bash
+...
+000000000002ec00 <main@@Base>:
+   2ec00:       f3 0f 1e fa             endbr64
+   2ec04:       41 57                   push   %r15
+   2ec06:       41 56                   push   %r14
+   2ec08:       41 55                   push   %r13
+   ...
+# bpftrace -e 'uprobe:/bin/bash:main+4 { printf("in here\n"); }'
+Attaching 1 probe...
+...
+```
+偏移的地址会被检查是否与指令对齐。如果没有对齐，探测器会添加失败。
+
+```
+# bpftrace -e 'uprobe:/bin/bash:main+1 { printf("in here\n"); }'
+Attaching 1 probe...
+Could not add uprobe into middle of instruction: /bin/bash:main+1
+```
+
+如果 bpftrace 指定了 ALLOW_UNSAFE_PROBE 选项被编译，你可以使用 --unsafe 选项来跳过检查
+```
+# bpftrace -e 'uprobe:/bin/bash:main+1 { printf("in here\n"); } --unsafe'
+Attaching 1 probe...
+Unsafe uprobe in the middle of the instruction: /bin/bash:main+1
+```
+
+使用 --unsafe 选项你也可以探测任意的地址。在二进制程序被精简后会很有帮助
+```
+$ echo 'int main(){return 0;}' | gcc -xc -o bin -
+$ nm bin | grep main
+...
+0000000000001119 T main
+...
+$ strip bin
+# bpftrace --unsafe -e 'uprobe:bin:0x1119 { printf("main called\n"); }'
+Attaching 1 probe...
+WARNING: could not determine instruction boundary for uprobe:bin:4377 (binary appears stripped). Misaligned probes can lead to tracee crashes!
+```
+
+当追踪库的时候，推荐指定库的名称来替代完成路径。具体路径会被 /etc/ld.so.cache 自动解析出来。
+
+```
+# bpftrace -e 'uprobe:libc:malloc { printf("Allocated %d bytes\n", arg0); }'
+Allocated 4 bytes
+...
+```
+
+原始示例：[]() []()
+
+## 4. uprobe/uretprobe: 动态追踪用户级参数
+语法：
+```
+uprobe: arg0, arg1, ..., argN
+uretprobe: retval
+```
+
+可以通过这些变量的名字访问实参。arg0 是第一个参数，并只能被 uprobe 访问。 retval 是被探测函数的额返回值，并只能被 uretprobe 访问
+
+示例：
+```
+# bpftrace -e 'uprobe:/bin/bash:readline { printf("arg0: %d\n", arg0); }'
+Attaching 1 probe...
+arg0: 19755784
+arg0: 19755016
+arg0: 19755784
+^C
+```
+/bin/bash 中的 readline() 函数的第一个参数包含什么？我并不知道，我需要查看 bash 的源代码来找出它的参数是什么。
+
+```
+# bpftrace -e 'uprobe:/lib/x86_64-linux-gnu/libc-2.23.so:fopen { printf("fopen: %s\n", str(arg0)); }'
+Attaching 1 probe...
+fopen: /proc/filesystems
+fopen: /usr/share/locale/locale.alias
+fopen: /proc/self/mountinfo
+^C
+```
+
+这个例子中我知道 libc 的 fopen() 函数的第一个参数是路径名称，所以我用 uprobe 去追踪它。请调整与你操作系统中的路径进行匹配（你的可能不是 lib-2.23.so）。一个 str() 函数被用来将 char 指针转换为字符串，这些在随后的章节会进行解释.
+
+```
+# bpftrace -e 'uretprobe:/bin/bash:readline { printf("readline: \"%s\"\n", str(retval)); }'
+Attaching 1 probe...
+readline: "echo hi"
+readline: "ls -l"
+readline: "date"
+readline: "uname -r"
+^C
+```
+
+回到 bash readline() 函数的示例：查看完源码后，我知道了返回值是一个读到的字符串。因此我可以使用 uretprobe 与 retval 变量来查看读到的字符串。
+---
+
+如果被追踪的二进制程序开启了 DWARF，uprobe 也可以通形参的名称访问
+
+语法：
+```
+uprobe: args->NAME
+```
+
+参数可以通过解引用 args 来进行访问，并且可以通参数的名称进行访问。
+
+函数的参数列表可以通过详细列表选项获得：
+```
+# bpftrace -lv 'uprobe:/bin/bash:rl_set_prompt'
+uprobe:/bin/bash:rl_set_prompt
+    const char* prompt
+```
+
+示例（需要为 /bin/bash 安装调试信息）：
+```
+# bpftrace -e 'uprobe:/bin/bash:rl_set_prompt { printf("prompt: %s\n", str(args->prompt)); }'
+Attaching 1 probe...
+prompt: [user@localhost ~]$
+^C
+```
+
+原始示例 [xxx]()
+
+## 5. tracepoint: 内核级的静态追踪
+
+语法：```tracepoint:name```
+
+这里使用是 tracepoint（内核的一种能力）
+```
+# bpftrace -e 'tracepoint:block:block_rq_insert { printf("block I/O created by %d\n", tid); }'
+Attaching 1 probe...
+block I/O created by 28922
+block I/O created by 3949
+block I/O created by 883
+block I/O created by 28941
+block I/O created by 28941
+block I/O created by 28941
+[...]
+```
+
+原始示例 [search/tools](https://github.com/iovisor/bpftrace/search?q=tracepoint%3A+path%3Atools&type=Code)
+
+## 6. tracepoint: 静态追踪内核参数
+
+示例：
+```
+# bpftrace -e 'tracepoint:syscalls:sys_enter_openat { printf("%s %s\n", comm, str(args->filename)); }'
+Attaching 1 probe...
+irqbalance /proc/interrupts
+irqbalance /proc/stat
+snmpd /proc/diskstats
+snmpd /proc/stat
+snmpd /proc/vmstat
+snmpd /proc/net/dev
+[...]
+```
+
+除了 filename 成员，还可以打印 flags，mode 等。开始打印的在 common 后的成员，对 tracepoint 来说有特殊含义
+
+原始示例：[search /tools](https://github.com/iovisor/bpftrace/search?q=tracepoint%3A+path%3Atools&type=Code)
+
+## 7. usdt: 用户级静态追踪
+语法：
+```
+usdt:binary_path:probe_name
+usdt:binary_path:[probe_namespace]:probe_name
+usdt:library_path:probe_name
+usdt:library_path:[probe_namespace]:probe_name
+```
+
+如果 probe_name 在二进制程序中是唯一的 probe 的命名空间是可选的
+
+示例：
+```
+# bpftrace -e 'usdt:/root/tick:loop { printf("hi\n"); }'
+Attaching 1 probe...
+hi
+hi
+hi
+hi
+hi
+^C
+```
+
+探测器的命名空间可以被自动推导。如果二进制程序 /roo/tick 包含多个名称为 loop 的探测器（例如：tick:loop 与 tock:loop），将不会有探测器开始探测。这需要通过手工指定命名空间或者使用通配来解决。
+
+```
+# bpftrace -e 'usdt:/root/tick:loop { printf("hi\n"); }'
+ERROR: namespace for usdt:/root/tick:loop not specified, matched 2 probes
+INFO: please specify a unique namespace or use '*' to attach to all matched probes
+No probes to attach
+
+# bpftrace -e 'usdt:/root/tick:tock:loop { printf("hi\n"); }'
+Attaching 1 probe...
+hi
+hi
+^C
+
+# bpftrace -e 'usdt:/root/tick:*:loop { printf("hi\n"); }'
+Attaching 2 probes...
+hi
+hi
+hi
+hi
+^C
+```
+
+bpftrace 也支持 USDT 信号。如果你的环境与 bpftrace 都支持 uprobe recounts，那么在探测器探测的时候所有的进程都将自动激活 USDT 信号（--usdt-file-activation 将失效）。你可以通过运行一下内容检查你的系统是否支持 uprobe reounts：
+```
+# bpftrace --info 2>&1 | grep "uprobe refcount"
+  bcc bpf_attach_uprobe refcount: yes
+  uprobe refcount (depends on Build:bcc bpf_attach_uprobe refcount): yes
+```
+
+如果你的系统不支持 uprobe refount 你可以通过传递 -p $PID 或者 --usdt-file-activation 激活信号。 --usdt-file-activation 通过 /proc 查找将 probe 的二进制文件映射到其地址空间的进程，然后尝试附加探针。注意，文件激活只发生一次(在附加时)。换句话说，如果在稍后的跟踪会话中生成了带有可执行文件的新进程，那么当前的跟踪会话将不会激活新进程。还要注意--usdt-file-activation 是根据文件路径匹配，这意味着，如果 bpftrace 从根主机运行，那么如果有进程从私有挂载名称空间或绑定挂载目录执行，事情可能不会像预期的那样工作。一种解决方法是在适当的名称空间(即容器)中运行bpftrace。
