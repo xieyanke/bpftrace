@@ -974,4 +974,290 @@ bpftrace 也支持 USDT 信号。如果你的环境与 bpftrace 都支持 uprobe
   uprobe refcount (depends on Build:bcc bpf_attach_uprobe refcount): yes
 ```
 
-如果你的系统不支持 uprobe refount 你可以通过传递 -p $PID 或者 --usdt-file-activation 激活信号。 --usdt-file-activation 通过 /proc 查找将 probe 的二进制文件映射到其地址空间的进程，然后尝试附加探针。注意，文件激活只发生一次(在附加时)。换句话说，如果在稍后的跟踪会话中生成了带有可执行文件的新进程，那么当前的跟踪会话将不会激活新进程。还要注意--usdt-file-activation 是根据文件路径匹配，这意味着，如果 bpftrace 从根主机运行，那么如果有进程从私有挂载名称空间或绑定挂载目录执行，事情可能不会像预期的那样工作。一种解决方法是在适当的名称空间(即容器)中运行bpftrace。
+如果你的系统不支持 uprobe refcount 你可以通过传递 -p $PID 或者 --usdt-file-activation 激活信号。 --usdt-file-activation 通过 /proc 查找将 probe 的二进制文件映射到其进程的地址空间，然后尝试附加探针。注意，该激活只发生一次(在附加时)。换句话说，如果在稍后的跟踪会话中生成了带有可执行文件的新进程，那么当前的跟踪会话将不会激活新进程。还要注意--usdt-file-activation 是根据文件路径匹配，这意味着，如果 bpftrace 从根主机运行，那么如果有进程从私有挂载名称空间或绑定挂载目录执行，事情可能不会像预期的那样工作。一种解决方法是在适当的名称空间(即容器)中运行bpftrace。
+
+## 8. usdt: 用户级参数静态追踪
+示例：
+```
+# bpftrace -e 'usdt:/root/tick:loop { printf("%s: %d\n", str(arg0), arg1); }'
+my string: 1
+my string: 2
+my string: 3
+my string: 4
+my string: 5
+^C
+```
+
+```
+# bpftrace -e 'usdt:/root/tick:loop /arg1 > 2/ { printf("%s: %d\n", str(arg0), arg1); }'
+my string: 3
+my string: 4
+my string: 5
+my string: 6
+^C
+```
+
+
+## 9. profile：周期性时间采样
+语法：
+```
+profile:hz:rate
+profile:s:rate
+profile:ms:rate
+profile:us:rate
+```
+
+这些行为通过 perf_events（Linux 内核的一种能力，perf 也使用它） 完成
+
+示例：
+```
+# bpftrace -e 'profile:hz:99 { @[tid] = count(); }'
+Attaching 1 probe...
+^C
+
+@[32586]: 98
+@[0]: 579
+```
+
+## 10. interval: 周期性输出
+语法：
+```
+interval:ms:rate
+interval:s:rate
+interval:us:rate
+interval:hz:rate
+```
+
+这个只在单个 CPU 上执行，用来生成每个周期的输出内容
+
+示例：
+```
+# bpftrace -e 'tracepoint:raw_syscalls:sys_enter { @syscalls = count(); }
+    interval:s:1 { print(@syscalls); clear(@syscalls); }'
+Attaching 2 probes...
+@syscalls: 1263
+@syscalls: 731
+@syscalls: 891
+@syscalls: 1195
+@syscalls: 1154
+@syscalls: 1635
+@syscalls: 1208
+[...]
+```
+
+这里打印的是系统调用每秒的速率
+
+原始示例 [search /tools](https://github.com/iovisor/bpftrace/search?q=interval+extension%3Abt+path%3Atools&type=Code)
+
+## 11. software: 预定义软件事件
+
+语法：
+```
+software:event_name:count
+software:event_name:
+```
+
+这些是 Linux 内核预定的软件事件，通常通过 perf 工具集来追踪进行使用，它们与 tracepoint 很相似，但是它们这有下面这一部分，在 perf_event_open 的手册里面已经记录了。事件的名字分别是：
+
+- `cpu-clock` or `cpu`
+- `task-clock`
+- `page-faults` or `faults`
+- `context-switches` or `cs`
+- `cpu-migrations`
+- `minor-faults`
+- `major-faults`
+- `alignment-faults`
+- `emulation-faults`
+- `dummy`
+- `bpf-output`
+
+该计数是探测器的触发器，它将针对每个计数事件触发一次。如果没有提供计数，则使用默认值。
+
+示例：
+```
+# bpftrace -e 'software:faults:100 { @[comm] = count(); }'
+Attaching 1 probe...
+^C
+
+@[ls]: 1
+@[pager]: 2
+@[locale]: 2
+@[preconv]: 2
+@[sh]: 3
+@[tbl]: 3
+@[bash]: 4
+@[groff]: 5
+@[grotty]: 7
+@[sleep]: 9
+@[nroff]: 12
+@[troff]: 18
+@[man]: 97
+```
+
+通过对每100个错误中的一个进行进程进行抽样，这大致计算出是谁导致了页面错误。
+
+## 12. hardware: 预定义硬件事件
+
+语法：
+```
+hardware:event_name:count
+hardware:event_name:
+```
+
+这些是 Linux 内核预定义的硬件事件，通常通过 perf 工具集进行追踪。它们使用硬件监控计数器（PMCs）进行实现：处理器上的硬件资源。大概有这十个，它们都在 perf_event_open 手册中被记录，这些事件的名称是：
+
+- `cpu-cycles` or `cycles`
+- `instructions`
+- `cache-references`
+- `cache-misses`
+- `branch-instructions` or `branches`
+- `branch-misses`
+- `bus-cycles`
+- `frontend-stalls`
+- `backend-stalls`
+- `ref-cycles`
+
+该计数是探测器的触发器，它将针对每个计数事件触发一次。如果没有提供计数，则使用默认值。
+
+示例：
+```
+bpftrace -e 'hardware:cache-misses:1000000 { @[pid] = count(); }'
+```
+
+每 1000000 次缓存失效就会出发一次。这通常表示最后一级缓存。
+
+## 13. BEGIN / END：内置事件
+语法：
+```
+BEGIN
+END
+```
+这些是 bpftrace 运行时提供的内置事件。BEGIN 在所有探测器被附加之前被触发，END 在所有其他探测器被附加之后触发。
+
+原始示例 [(BEGIN) search /tools](https://github.com/iovisor/bpftrace/search?q=BEGIN+extension%3Abt+path%3Atools&type=Code) [(END) search /tools](https://github.com/iovisor/bpftrace/search?q=END+extension%3Abt+path%3Atools&type=Code)
+
+## 14. watchpoint / asyncwatchpoint：内存观察点
+语法：
+```
+watchpoint:absolute_address:length:mode
+watchpoint:function+argN:length:mode
+```
+
+这些是内核提供内存观察点。无论内存地址是被写（w），还是被读（r），还是执行(execute) 都可以生成一个事件。
+
+
+## 15. kfunc/kretfunc：内核函数追踪
+语法：
+```
+kfunc:function
+kretfunc:function
+```
+这些是内核函数探测器通过 eBPF 蹦床实现，它允许内核代码几乎以零开销调用 BPF程序
+
+示例：
+```
+# bpftrace -e 'kfunc:x86_pmu_stop { printf("pmu %s stop\n", str(args->event->pmu->name)); }'
+# bpftrace -e 'kretfunc:fget { printf("fd %d name %s\n", args->fd, str(retval->f_path.dentry->d_name.name));  }'
+```
+
+你可以通过 list 选项获取可用函数:
+```
+# bpftrace -l
+...
+kfunc:ksys_ioperm
+kfunc:ksys_unshare
+kfunc:ksys_setsid
+kfunc:ksys_sync_helper
+kfunc:ksys_fadvise64_64
+kfunc:ksys_readahead
+kfunc:ksys_mmap_pgoff
+...
+```
+
+
+## 16. kfunc/kretfunc：内核函数参数追踪
+
+语法：
+```
+kfunc:function      args->NAME  ...
+kretfunc:function   args->NAME ... retval
+```
+参数可以通过 args 解引用后的名称进行访问。返回值可以被内置的 retval 进行引用，查看 1. [Builtins]()
+可以通过详细列表选项查看函数的参数名称。
+```
+# bpftrace -lv
+...
+kfunc:fget
+    unsigned int fd;
+    struct file * retval;
+...
+```
+
+fget 函数 通过一个参数作为文件描述符，在 kfunc:fget 探测器中你可以通过 args->fd 访问它:
+```
+# bpftrace -e 'kfunc:fget { printf("fd %d\n", args->fd);  }'
+Attaching 1 probe...
+fd 3
+fd 3
+...
+```
+fget 函数探测器的返回值可以通过 retval 进行访问
+
+```
+# bpftrace -e 'kretfunc:fget { printf("fd %d name %s\n", args->fd, str(retval->f_path.dentry->d_name.name));  }'
+Attaching 1 probe...
+fd 3 name ld.so.cache
+fd 3 name libselinux.so.1
+fd 3 name libselinux.so.1
+...
+```
+正如你上面的例子看到的你也可以通过 kretfunc 探测器访问函数的参数
+
+
+
+
+## 17. iter：迭代器追踪
+提醒：这个功能是实验阶段并且接口可能会有变化
+
+语法：
+```
+iter:task[:pin]
+iter:task_file[:pin]
+```
+
+内核版本：5.4
+
+这些 eBPF 迭代探测器，允许迭代 Linux 内核对象。
+
+迭代探测器不能与其他探测器混合使用，甚至不能与其他迭代器混用。
+
+每个迭代探测器提供以一组字段可以通过上下文指针访问。用户可以通过 -lv 查看迭代器可用的字段，就像下面这样：
+```
+# bpftrace -e 'iter:task { printf("%s:%d\n", ctx->task->comm, ctx->task->pid); }'
+Attaching 1 probe...
+systemd:1
+kthreadd:2
+rcu_gp:3
+rcu_par_gp:4
+kworker/0:0H:6
+mm_percpu_wq:8
+...
+
+# bpftrace -e 'iter:task_file { printf("%s:%d %d:%s\n", ctx->task->comm, ctx->task->pid, ctx->fd, path(ctx->file->f_path)); }'
+Attaching 1 probe...
+systemd:1 1:/dev/null
+systemd:1 2:/dev/null
+systemd:1 3:/dev/kmsg
+...
+su:1622 1:/dev/pts/1
+su:1622 2:/dev/pts/1
+su:1622 3:/var/lib/sss/mc/passwd
+...
+bpftrace:1892 1:pipe:[35124]
+bpftrace:1892 2:/dev/pts/1
+bpftrace:1892 3:anon_inode:bpf-map
+bpftrace:1892 4:anon_inode:bpf-map
+bpftrace:1892 5:anon_inode:bpf_link
+bpftrace:1892 6:anon_inode:bpf-prog
+bpftrace:1892 7:anon_inode:bpf_iter
+```
