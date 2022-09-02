@@ -1137,13 +1137,79 @@ END
 原始示例 [(BEGIN) search /tools](https://github.com/iovisor/bpftrace/search?q=BEGIN+extension%3Abt+path%3Atools&type=Code) [(END) search /tools](https://github.com/iovisor/bpftrace/search?q=END+extension%3Abt+path%3Atools&type=Code)
 
 ## 14. watchpoint / asyncwatchpoint：内存观察点
+
 语法：
 ```
 watchpoint:absolute_address:length:mode
 watchpoint:function+argN:length:mode
 ```
 
-这些是内核提供内存观察点。无论内存地址是被写（w），还是被读（r），还是执行(execute) 都可以生成一个事件。
+这些是内核提供内存观察点。无论内存地址是被写(w)，还是被读(r)，还是执行(x)，内核都可以生成一个事件。
+
+第一种方式是监控相对地址。如果提供一个 pid (-p) 或者一个命令 (-c) , bpftrace 将该地址视为用户空间地址，并开始监视适当的进程。如果没有提供 bpftrace 将该地址视为内核空间地址。
+
+第二中方式当函数被检测后，地址以 argN 呈现(查看[uprobe 参数]())，pid 或者命令在这种方式中是必须提供的，如果是同步的，一个 SIGSTOP 信号会被发送给附加在函数入口上的探测器，然后在 watchpoint 附加上之后探测器会收到 SITCONT 型号。这样是为了确保事件不丢失。如果你想避免 SIGSTOP + SIGCONT 请使用 asyncwatchpoint
+
+需要注意的是在大多数体系结构上，在监视读或者写的时候是不会监视执行情况的。
+
+示例：
+```
+bpftrace -e 'watchpoint:0x10000000:8:rw { printf("hit!\n"); exit(); }' -c ./testprogs/watchpoint
+```
+
+当 watchpoint 进程尝试对地址 0x10000000 进行读写的时候 它将输出 hit 并且退出。
+```
+# bpftrace -e "watchpoint:0x$(awk '$3 == "jiffies" {print $1}' /proc/kallsyms):8:w {@[kstack] = count();}"
+Attaching 1 probe...
+^C
+......
+@[
+    do_timer+12
+    tick_do_update_jiffies64.part.22+89
+    tick_sched_do_timer+103
+    tick_sched_timer+39
+    __hrtimer_run_queues+256
+    hrtimer_interrupt+256
+    smp_apic_timer_interrupt+106
+    apic_timer_interrupt+15
+    cpuidle_enter_state+188
+    cpuidle_enter+41
+    do_idle+536
+    cpu_startup_entry+25
+    start_secondary+355
+    secondary_startup_64+164
+]: 319
+```
+
+当 jiffies 更新的时候可以展示内核栈
+
+```
+# cat wpfunc.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+__attribute__((noinline))
+void increment(__attribute__((unused)) int _, int *i)
+{
+  (*i)++;
+}
+
+int main()
+{
+  int *i = malloc(sizeof(int));
+  while (1)
+  {
+    increment(0, i);
+    (*i)++;
+    usleep(1000);
+  }
+}
+
+# bpftrace -e 'watchpoint:increment+arg1:4:w { printf("hit!\n"); exit() }' -c ./wpfunc
+```
+
+内存指针被通过 increment 的 arg1 写入的时候 bpftrace 将输出 hit 并且退出当
 
 
 ## 15. kfunc/kretfunc：内核函数追踪
@@ -1214,10 +1280,8 @@ fd 3 name libselinux.so.1
 正如你上面的例子看到的你也可以通过 kretfunc 探测器访问函数的参数
 
 
-
-
 ## 17. iter：迭代器追踪
-提醒：这个功能是实验阶段并且接口可能会有变化
+提醒：这个功能还处于实验阶段并且接口可能会有变化
 
 语法：
 ```
@@ -1231,7 +1295,7 @@ iter:task_file[:pin]
 
 迭代探测器不能与其他探测器混合使用，甚至不能与其他迭代器混用。
 
-每个迭代探测器提供以一组字段可以通过上下文指针访问。用户可以通过 -lv 查看迭代器可用的字段，就像下面这样：
+每个迭代探测器提供了一组可以通过上下问指针访问的字段。用户可以通过 -lv 查看迭代器的可用字段，就像下面这样：
 ```
 # bpftrace -e 'iter:task { printf("%s:%d\n", ctx->task->comm, ctx->task->pid); }'
 Attaching 1 probe...
@@ -1261,3 +1325,411 @@ bpftrace:1892 5:anon_inode:bpf_link
 bpftrace:1892 6:anon_inode:bpf-prog
 bpftrace:1892 7:anon_inode:bpf_iter
 ```
+
+你可通过添加 list 选项查看所有可以函数：
+```
+# bpftrace -l iter:*
+iter:task
+iter:task_file
+
+# bpftrace -l iter:* -v
+iter:task
+    struct task_struct *task;
+iter:task_file
+    struct task_struct *task;
+    int fd;
+    struct file *file;
+```
+
+通过指定探测器额外的部分 ':pin' 可以使用定义在 pin 文件中的迭代探测器。文件可以使用绝对路径或者相对 /sys/fs/bpf 的相对路径：
+
+pin 文件为相对路径的示例：
+```
+# bpftrace -e 'iter:task:list { printf("%s:%d\n", ctx->task->comm, ctx->task->pid); }'
+Attaching 1 probe...
+Program pinned to /sys/fs/bpf/list
+
+
+# cat /sys/fs/bpf/list
+systemd:1
+kthreadd:2
+rcu_gp:3
+rcu_par_gp:4
+kworker/0:0H:6
+mm_percpu_wq:8
+rcu_tasks_kthre:9
+...
+```
+
+pin 文件为绝对路径的示例：
+```
+# bpftrace -e 'iter:task_file:/sys/fs/bpf/files { printf("%s:%d %s\n", ctx->task->comm, ctx->task->pid, path(ctx->file->f_path)); }'
+Attaching 1 probe...
+Program pinned to /sys/fs/bpf/files
+
+# cat /sys/fs/bpf/files
+systemd:1 anon_inode:inotify
+systemd:1 anon_inode:[timerfd]
+...
+systemd-journal:849 /dev/kmsg
+systemd-journal:849 anon_inode:[eventpoll]
+...
+sssd:1146 /var/log/sssd/sssd.log
+sssd:1146 anon_inode:[eventpoll]
+...
+NetworkManager:1155 anon_inode:[eventfd]
+NetworkManager:1155 /var/lib/sss/mc/passwd (deleted)`
+```
+
+# 变量
+
+## 1. 内置变量
+
+- `pid` - 进程 ID (kernel tgid)
+- `tid` - 线程 ID (kernel pid)
+- `uid` - 用户 ID
+- `gid` - 用户组 ID
+- `nsecs` - 纳秒时间戳
+- `elapsed` - 自从 bpftrace 被初始化后的纳秒时间
+- `numaid` - NUMA 的节点 ID
+- `cpu` - 处理器 ID
+- `comm` - 进程名称
+- `kstack` - 内核栈追踪
+- `ustack` - 用户栈追踪
+- `arg0`, `arg1`, ..., `argN`. - 追踪函数的参数; 假定参数为 64 位
+- `sarg0`, `sarg1`, ..., `sargN`. - 追踪函数的参数 (用于将参数保存在栈中的程序); 假定参数为 64 位
+- `retval` - 追踪函数的返回值
+- `func` - 追踪函数的名称
+- `probe` - 探测器的全称
+- `curtask` - 当前 task 结构体的 u64 表示
+- `rand` - u32 的随机数
+- `cgroup` - 当前进程的 CGroup ID
+- `cpid` - 子进程 id(u32), 仅对 -c 命令有效
+- `$1`, `$2`, ..., `$N`, `$#`. - bpftrace 程序的位置参数
+
+其中的许多内容在其他章节进行讨论(可以使用搜索进行查找)
+
+
+## 2. @,$：基础变量
+
+语法：
+
+```
+@global_name
+@thread_local_variable_name[tid]
+$scratch_name
+```
+
+bpftrace 支持全局变量、per-thread(通过 bpf map) 变量以及临时变量
+
+示例：
+### 2.1 全局变量
+
+语法：@name
+
+示例，```@start```
+```
+# bpftrace -e 'BEGIN { @start = nsecs; }
+    kprobe:do_nanosleep /@start != 0/ { printf("at %d ms: sleep\n", (nsecs - @start) / 1000000); }'
+Attaching 2 probes...
+at 437 ms: sleep
+at 647 ms: sleep
+at 1098 ms: sleep
+at 1438 ms: sleep
+at 1648 ms: sleep
+^C
+
+@start: 4064438886907216
+```
+
+### 2.2 Per-Thread：
+
+它们可以被实现为一个以线程 id 为键的关联数组，例如：@start[tid]：
+```
+# bpftrace -e 'kprobe:do_nanosleep { @start[tid] = nsecs; }
+    kretprobe:do_nanosleep /@start[tid] != 0/ {
+        printf("slept for %d ms\n", (nsecs - @start[tid]) / 1000000); delete(@start[tid]); }'
+Attaching 2 probes...
+slept for 1000 ms
+slept for 1000 ms
+slept for 1000 ms
+slept for 1009 ms
+slept for 2002 ms
+[...]
+```
+
+### 2.3 临时变量：
+
+语法：$name
+
+示例，```$delta```：
+
+```
+# bpftrace -e 'kprobe:do_nanosleep { @start[tid] = nsecs; }
+    kretprobe:do_nanosleep /@start[tid] != 0/ { $delta = nsecs - @start[tid];
+        printf("slept for %d ms\n", $delta / 1000000); delete(@start[tid]); }'
+Attaching 2 probes...
+slept for 1000 ms
+slept for 1000 ms
+slept for 1000 ms
+```
+
+## 3. @[]: 关联数组
+
+语法：
+```
+@associative_array_name[key_name] = value
+@associative_array_name[key_name, key_name2, ...] = value
+```
+这些是通过 bpf maps 实现的。
+
+例如， @start[tid]：
+```
+# bpftrace -e 'kprobe:do_nanosleep { @start[tid] = nsecs; }
+    kretprobe:do_nanosleep /@start[tid] != 0/ {
+        printf("slept for %d ms\n", (nsecs - @start[tid]) / 1000000); delete(@start[tid]); }'
+Attaching 2 probes...
+slept for 1000 ms
+slept for 1000 ms
+slept for 1000 ms
+[...]
+```
+
+```
+# bpftrace -e 'BEGIN { @[1,2] = 3; printf("%d\n", @[1,2]); clear(@); }'
+Attaching 1 probe...
+3
+^C
+```
+
+## 4. count(): 频率统计
+
+通过 count() 函数提供能力：查看 [count()]() 章节
+
+## 5. hist(), lhist(): 直方图
+
+通过 hist() 与 lhist() 函数提供能力，查看 [Log2 直方图]() 与[线性直方图]() 章节
+
+## 6. nsecs: 时间戳与时间增量
+
+语法：```nsecs```
+
+通过使用 bpf_ktime_get_ns() 实现
+
+示例：
+```
+# bpftrace -e 'BEGIN { @start = nsecs; }
+    kprobe:do_nanosleep /@start != 0/ { printf("at %d ms: sleep\n", (nsecs - @start) / 1000000); }'
+Attaching 2 probes...
+at 437 ms: sleep
+at 647 ms: sleep
+at 1098 ms: sleep
+at 1438 ms: sleep
+^C
+```
+
+## 7. kstack: 内核栈追踪
+
+语法：```kstack```
+
+这是内核函数 kstack() 的别名
+
+示例：
+```
+# bpftrace -e 'kprobe:ip_output { @[kstack] = count(); }'
+Attaching 1 probe...
+[...]
+@[
+    ip_output+1
+    tcp_transmit_skb+1308
+    tcp_write_xmit+482
+    tcp_release_cb+225
+    release_sock+64
+    tcp_sendmsg+49
+    sock_sendmsg+48
+    sock_write_iter+135
+    __vfs_write+247
+    vfs_write+179
+    sys_write+82
+    entry_SYSCALL_64_fastpath+30
+]: 1708
+@[
+    ip_output+1
+    tcp_transmit_skb+1308
+    tcp_write_xmit+482
+    __tcp_push_pending_frames+45
+    tcp_sendmsg_locked+2637
+    tcp_sendmsg+39
+    sock_sendmsg+48
+    sock_write_iter+135
+    __vfs_write+247
+    vfs_write+179
+    sys_write+82
+    entry_SYSCALL_64_fastpath+30
+]: 9048
+@[
+    ip_output+1
+    tcp_transmit_skb+1308
+    tcp_write_xmit+482
+    tcp_tasklet_func+348
+    tasklet_action+241
+    __do_softirq+239
+    irq_exit+174
+    do_IRQ+74
+    ret_from_intr+0
+    cpuidle_enter_state+159
+    do_idle+389
+    cpu_startup_entry+111
+    start_secondary+398
+    secondary_startup_64+165
+]: 11430
+```
+
+## 8. ustack: 用户栈追踪
+
+语法：```ustack```
+
+这是内置函数 ustack() 函数的别名
+
+示例：
+```
+# bpftrace -e 'kprobe:do_sys_open /comm == "bash"/ { @[ustack] = count(); }'
+Attaching 1 probe...
+^C
+
+@[
+    __open_nocancel+65
+    command_word_completion_function+3604
+    rl_completion_matches+370
+    bash_default_completion+540
+    attempt_shell_completion+2092
+    gen_completion_matches+82
+    rl_complete_internal+288
+    rl_complete+145
+    _rl_dispatch_subseq+647
+    _rl_dispatch+44
+    readline_internal_char+479
+    readline_internal_charloop+22
+    readline_internal+23
+    readline+91
+    yy_readline_get+152
+    yy_readline_get+429
+    yy_getc+13
+    shell_getc+469
+    read_token+251
+    yylex+192
+    yyparse+777
+    parse_command+126
+    read_command+207
+    reader_loop+391
+    main+2409
+    __libc_start_main+231
+    0x61ce258d4c544155
+]: 9
+@[
+    __open_nocancel+65
+    command_word_completion_function+3604
+    rl_completion_matches+370
+    bash_default_completion+540
+    attempt_shell_completion+2092
+    gen_completion_matches+82
+    rl_complete_internal+288
+    rl_complete+89
+    _rl_dispatch_subseq+647
+    _rl_dispatch+44
+    readline_internal_char+479
+    readline_internal_charloop+22
+    readline_internal+23
+    readline+91
+    yy_readline_get+152
+    yy_readline_get+429
+    yy_getc+13
+    shell_getc+469
+    read_token+251
+    yylex+192
+    yyparse+777
+    parse_command+126
+    read_command+207
+    reader_loop+391
+    main+2409
+    __libc_start_main+231
+    0x61ce258d4c544155
+]: 18
+```
+
+需要注意的是为了让示例正常工作，bash 需要开启帧指针进行重新编译
+
+## 9. $1, ..., $N, $#：位置参数
+
+语法：$1, ..., $N, $#
+
+这些是 bpftrace 程序的位置参数，也称为命令参数。如果参数是数字类型（全部是数字）。它可以被作为数字使用。如果参数不是数字，参数必须在 str() 里作为字符串进行使用。如果没有为形参提供实参，如果是数字类型默认值为 0 ，如果是字符串默认值为 “”，位置参数也可以为探测器的形参使用，将会作为字符串类型的参数进行赋值
+
+如果一个位置参数是在 str() 函数中使用，它将被解析为一个指向实际字符串字面量的指针，这里允许进行指针运算。只允许添加一个小于或等于所提供字符串长度的常量。
+
+$# 返回提供的位置参数总数
+
+位置参数允许编写使用基本参数来改变其行为的脚本。但是如果您开发的脚本需要更复杂的参数处理，它可能更适合使用bcc，因为它支持 Python 的 argparse 和完全自定义的参数处理。
+
+单行示例：
+```
+# bpftrace -e 'BEGIN { printf("I got %d, %s (%d args)\n", $1, str($2), $#); }' 42 "hello"
+Attaching 1 probe...
+I got 42, hello (2 args)
+
+# bpftrace -e 'BEGIN { printf("%s\n", str($1 + 1)) }' "hello"
+Attaching 1 probe...
+ello
+```
+
+脚本示例：
+```
+#!/usr/local/bin/bpftrace
+
+BEGIN
+{
+	printf("Tracing block I/O sizes > %d bytes\n", $1);
+}
+
+tracepoint:block:block_rq_issue
+/args->bytes > $1/
+{
+	@ = hist(args->bytes);
+}
+```
+
+当用 65535 参数来运行:
+
+```
+# ./bsize.bt 65536
+Attaching 2 probes...
+Tracing block I/O sizes > 65536 bytes
+^C
+
+@:
+[512K, 1M)             1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+```
+
+它已经将参数传递给了 $1, 并且将其作为过滤器。
+
+如果不提供实参，$1 的默认值为 0
+
+```
+# ./bsize.bt
+Attaching 2 probes...
+Tracing block I/O sizes > 0 bytes
+^C
+
+@:
+[4K, 8K)             115 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8K, 16K)             35 |@@@@@@@@@@@@@@@                                     |
+[16K, 32K)             5 |@@                                                  |
+[32K, 64K)             3 |@                                                   |
+[64K, 128K)            1 |                                                    |
+[128K, 256K)           0 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |                                                    |
+```
+
+
